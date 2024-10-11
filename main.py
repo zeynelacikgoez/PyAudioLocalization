@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.signal import butter, filtfilt, wiener, chirp, find_peaks, correlate, correlation_lags
+from scipy.signal import butter, filtfilt, wiener, chirp, find_peaks, correlate, correlation_lags, get_window
 from scipy.optimize import least_squares, differential_evolution
 from scipy.interpolate import CubicSpline
 from scipy.fft import fft, ifft
@@ -66,7 +66,7 @@ def distance(point1, point2):
     return np.linalg.norm(point1 - point2)
 
 
-def generate_image_sources_iterative(source, planes, max_order, frequency, material_properties, absorption_threshold=0.01):
+def generate_image_sources_iterative(source, planes, max_order, frequency, material_properties, mic_positions, absorption_threshold=0.01):
     """
     Iterativ generierte Bildquellen bis zur maximalen Reflexionsordnung, unter Berücksichtigung von Absorptionsschwellen.
 
@@ -75,6 +75,7 @@ def generate_image_sources_iterative(source, planes, max_order, frequency, mater
     :param max_order: Maximale Reflexionsordnung
     :param frequency: Frequenz des Signals in Hz
     :param material_properties: Dictionary mit materialabhängigen Dämpfungsfaktoren
+    :param mic_positions: Array der Mikrofonpositionen (nx3)
     :param absorption_threshold: Minimale Abschwächung, um eine Bildquelle zu berücksichtigen
     :return: Liste von Bildquellen als Dictionary {'source': [x', y', z'], 'material': 'material_name'}
     """
@@ -91,9 +92,10 @@ def generate_image_sources_iterative(source, planes, max_order, frequency, mater
                 image = reflect_point_across_plane(src, plane['plane'])
                 image_tuple = tuple(np.round(image, decimals=6))  # Runden zur Vermeidung von Float-Duplikaten
                 if image_tuple not in seen_sources:
-                    # Berechne die Abschwächung für die Bildquelle
-                    attenuation = calculate_attenuation(distance(image, source), plane.get('material', 'air'), frequency, material_properties)
-                    if attenuation > absorption_threshold:
+                    # Berechne die Abschwächung für die Bildquelle basierend auf Entfernung zu jedem Mikrofon
+                    attenuations = [calculate_attenuation(distance(image, mic_pos), plane.get('material', 'air'), frequency, material_properties) for mic_pos in mic_positions]
+                    # Überprüfen, ob mindestens eine Abschwächung über dem Schwellenwert liegt
+                    if any(att > absorption_threshold for att in attenuations):
                         seen_sources.add(image_tuple)
                         image_sources.append({'source': image, 'material': plane.get('material', 'air')})
                         new_sources.append(image)
@@ -105,7 +107,7 @@ def generate_image_sources_iterative(source, planes, max_order, frequency, mater
 
 def calculate_attenuation(distance_val, material, frequency, material_properties):
     """
-    Berechnet die Abschwächung der Signalamplitude basierend auf dem inversen Quadratgesetz
+    Berechnet die Abschwächung der Signalamplitude basierend auf dem inversen Quadrat der Entfernung
     und materialabhängigen Absorptionsfaktoren.
 
     :param distance_val: Entfernung zwischen Quelle und Mikrofon in Metern
@@ -114,15 +116,16 @@ def calculate_attenuation(distance_val, material, frequency, material_properties
     :param material_properties: Dictionary mit materialabhängigen Dämpfungsfaktoren
     :return: Abschwächungsfaktor als float
     """
-    # Geometrische Abschwächung (inverse Quadrat der Entfernung)
+    # Geometrische Abschwächung (inverse Entfernung)
     if distance_val == 0:
         distance_val = 1e-6  # Sehr kleine Distanz zur Vermeidung von Division durch Null
-    geometrical_attenuation = 1 / (distance_val ** 2)
+    geometrical_attenuation = 1 / distance_val
 
     # Materialabhängige Dämpfung
     absorption_coeff = material_properties.get(f'{material}_absorption', 0.01)  # Angepasster Standardwert
-    # Frequenzabhängige Dämpfung (lineare Beziehung)
-    frequency_attenuation = material_properties.get(f'{material}_freq', 0.1) * frequency  # Angepasst
+
+    # Frequenzabhängige Dämpfung (exponentielle Beziehung)
+    frequency_attenuation = np.exp(-material_properties.get(f'{material}_freq', 0.1) * frequency * distance_val)
 
     # Exponentielle Absorption entlang der Strecke
     absorption = np.exp(-absorption_coeff * distance_val)
@@ -814,10 +817,12 @@ def lokalisieren_schallquelle(
     :return: Dictionary mit Ergebnissen der Lokalisierung
     """
     try:
-        # Überprüfen der Mikrofonanzahl und Dimensionen
+        # Eingabevalidierung
+        if not isinstance(mic_positions, np.ndarray):
+            raise TypeError("mic_positions muss ein numpy-Array sein.")
         if mic_positions.ndim != 2 or mic_positions.shape[1] != 3:
-            raise ValueError("Mikrofonpositionen müssen ein nx3-Array sein.")
-        if mic_positions.shape[0] < 2:
+            raise ValueError("mic_positions muss ein nx3-Array sein.")
+        if len(mic_positions) < 2:
             raise ValueError("Mindestens zwei Mikrofone sind für die Lokalisierung erforderlich.")
 
         # 1. Berechnung der Schallgeschwindigkeit
@@ -855,7 +860,7 @@ def lokalisieren_schallquelle(
                 material_properties=material_properties,
                 max_reflections=max_reflections,
                 max_distance=max_distance,
-                buffer_time=0.1  # Optional, zusätzliche 100 ms Puffer
+                absorption_threshold=absorption_threshold
             )
             logging.info(f"Simulierte Signale generiert mit Signaltyp '{signal_type}'.")
         else:
