@@ -779,14 +779,14 @@ def lokalisieren_schallquelle(
     filter_method='butterworth',
     use_simulation=True,
     audiodateien=None,
-    max_distance=10,  # Maximal erwarteter Abstand der Schallquelle in Metern
+    # max_distance=10,  # Entfernt, da nicht in simulate_signals_with_multipath verwendet
+    absorption_threshold=0.01,  # Minimale Abschwächung zur Berücksichtigung einer Bildquelle
     analyze_correlation=False,  # Neuer Parameter zur Aktivierung der erweiterten Analyse
     visualize_correlation=False,  # Neuer Parameter zur Aktivierung der erweiterten Visualisierung
     num_paths=1,  # Anzahl der Pfade, die identifiziert werden sollen
     clustering_eps=None,  # Epsilon für DBSCAN-Clustering in Sekunden, dynamisch angepasst
     clustering_min_samples=2,  # Mindestanzahl von Peaks pro Cluster für DBSCAN
     max_reflections=2,  # Maximale Anzahl der Reflexionen
-    absorption_threshold=0.01,  # Minimale Abschwächung zur Berücksichtigung einer Bildquelle
     num_sources=1  # Anzahl der Schallquellen
 ):
     """
@@ -805,14 +805,13 @@ def lokalisieren_schallquelle(
     :param filter_method: Methode zur Rauschunterdrückung ('butterworth', 'wiener')
     :param use_simulation: Boolean, ob Simulation verwendet werden soll
     :param audiodateien: Liste der Pfade zu Audiodateien (nur wenn use_simulation=False)
-    :param max_distance: Maximal erwarteter Abstand der Schallquelle in Metern
+    :param absorption_threshold: Minimale Abschwächung zur Berücksichtigung einer Bildquelle
     :param analyze_correlation: Boolean, ob erweiterte Analyse der Kreuzkorrelation durchgeführt werden soll
     :param visualize_correlation: Boolean, ob erweiterte Visualisierung der Kreuzkorrelation durchgeführt werden soll
     :param num_paths: Anzahl der Pfade, die identifiziert werden sollen
     :param clustering_eps: Epsilon-Wert für DBSCAN-Clustering in Sekunden (dynamisch angepasst)
     :param clustering_min_samples: Mindestanzahl von Peaks pro Cluster für DBSCAN
     :param max_reflections: Maximale Anzahl der Reflexionen
-    :param absorption_threshold: Minimale Abschwächung zur Berücksichtigung einer Bildquelle
     :param num_sources: Anzahl der Schallquellen
     :return: Dictionary mit Ergebnissen der Lokalisierung
     """
@@ -859,7 +858,6 @@ def lokalisieren_schallquelle(
                 reflektierende_ebenen=reflektierende_ebenen,
                 material_properties=material_properties,
                 max_reflections=max_reflections,
-                max_distance=max_distance,
                 absorption_threshold=absorption_threshold
             )
             logging.info(f"Simulierte Signale generiert mit Signaltyp '{signal_type}'.")
@@ -1065,6 +1063,7 @@ def lokalisieren_schallquelle(
             'korrelationsmatrix': corr_matrix if visualize_correlation else None
         }
 
+
 def simulate_signals_with_multipath(
     source_pos,
     mic_positions,
@@ -1075,7 +1074,8 @@ def simulate_signals_with_multipath(
     freq=1000,
     reflektierende_ebenen=None,
     material_properties=None,
-    max_reflections=2
+    max_reflections=2,
+    absorption_threshold=0.01  # Neuer Parameter hinzugefügt
 ):
     """
     Simuliert Signale für alle Mikrofone unter Berücksichtigung von Mehrwegeausbreitung.
@@ -1090,10 +1090,11 @@ def simulate_signals_with_multipath(
     :param reflektierende_ebenen: Liste von Ebenen, jede definiert durch {'plane': [a, b, c, d], 'material': 'material_name'}
     :param material_properties: Dictionary mit Materialeigenschaften für Dämpfungen
     :param max_reflections: Maximale Anzahl von Reflexionen
+    :param absorption_threshold: Minimale Abschwächung zur Berücksichtigung einer Bildquelle
     :return: Liste von simulierten Signalen für jedes Mikrofon
     """
     base_signal = generate_signal(signal_type, fs, duration, freq)
-    all_image_sources = generate_image_sources_iterative(source_pos, reflektierende_ebenen, max_reflections, freq, material_properties)
+    all_image_sources = generate_image_sources_iterative(source_pos, reflektierende_ebenen, max_reflections, freq, material_properties, mic_positions, absorption_threshold=absorption_threshold)
     signals = []
     
     # Bestimmen der maximalen Verzögerung
@@ -1154,7 +1155,7 @@ if __name__ == "__main__":
     source_position = np.array([0.5, 0.5, 0.5])  # Tatsächliche Position der Schallquelle
     duration = 1.0  # Dauer des Signals in Sekunden
     freq = 1000  # Frequenz des Sinussignals in Hz
-    max_distance = 10  # Maximal erwarteter Abstand der Schallquelle in Metern
+    # max_distance = 10  # Entfernt, da nicht verwendet
 
     # Definieren der reflektierenden Ebenen mit Materialeigenschaften
     reflektierende_ebenen = [
@@ -1190,14 +1191,15 @@ if __name__ == "__main__":
         material_properties=material_properties,
         filter_method='butterworth',
         use_simulation=True,
-        max_distance=max_distance,
+        # max_distance=max_distance,  # Entfernt
+        absorption_threshold=0.01,  # Hinzugefügt
         analyze_correlation=True,
         visualize_correlation=True,
         num_paths=1,  # Kann auf höhere Werte gesetzt werden, um mehrere Pfade zu identifizieren
         clustering_eps=None,  # Dynamisch angepasst
         clustering_min_samples=2,
         max_reflections=3,  # Erhöhte Anzahl der Reflexionen
-        absorption_threshold=0.01
+        # absorption_threshold=0.01  # Bereits oben definiert
     )
 
     # Weitere Tests mit verschiedenen Signaltypen
@@ -1217,14 +1219,14 @@ if __name__ == "__main__":
             material_properties=material_properties,
             filter_method='butterworth',
             use_simulation=True,
-            max_distance=max_distance,
+            absorption_threshold=0.01,  # Hinzugefügt
             analyze_correlation=True,
             visualize_correlation=True,
             num_paths=1,  # Kann auf höhere Werte gesetzt werden
             clustering_eps=0.001,
             clustering_min_samples=2,
             max_reflections=3,
-            absorption_threshold=0.01
+            num_sources=1
         )
 
     # Lokalisierung mit realen Audiodaten und Butterworth-Filter, erweiterte Analyse und Visualisierung aktiviert
@@ -1238,14 +1240,14 @@ if __name__ == "__main__":
         use_simulation=False,
         audiodateien=audiodateien,
         filter_method='butterworth',
-        max_distance=max_distance,
+        absorption_threshold=0.01,  # Hinzugefügt
         analyze_correlation=True,
         visualize_correlation=True,
         num_paths=1,  # Kann auf höhere Werte gesetzt werden
         clustering_eps=0.001,
         clustering_min_samples=2,
         max_reflections=3,
-        absorption_threshold=0.01
+        num_sources=1
     )
 
     # Lokalisierung mit realen Audiodaten und Wiener-Filter, erweiterte Analyse und Visualisierung aktiviert
@@ -1258,12 +1260,12 @@ if __name__ == "__main__":
         use_simulation=False,
         audiodateien=audiodateien,
         filter_method='wiener',
-        max_distance=max_distance,
+        absorption_threshold=0.01,  # Hinzugefügt
         analyze_correlation=True,
         visualize_correlation=True,
         num_paths=1,  # Kann auf höhere Werte gesetzt werden
         clustering_eps=0.001,
         clustering_min_samples=2,
         max_reflections=3,
-        absorption_threshold=0.01
+        num_sources=1
     )
