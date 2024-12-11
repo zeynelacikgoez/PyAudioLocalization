@@ -10,14 +10,29 @@ import logging
 from mpl_toolkits.mplot3d import Axes3D
 import time
 from math import gcd
-from sklearn.cluster import DBSCAN, KMeans
+from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
-from statsmodels.stats.multitest import fdrcorrection
 import os
 import resampy  # Für hochwertiges Resampling
 
 # Konfigurieren des Loggings
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
+# Überprüfung der erforderlichen Bibliotheken
+required_libraries = [
+    'numpy', 'scipy', 'soundfile', 'matplotlib', 'sklearn', 'resampy'
+]
+
+missing_libraries = []
+for lib in required_libraries:
+    try:
+        __import__(lib)
+    except ImportError:
+        missing_libraries.append(lib)
+
+if missing_libraries:
+    logging.error(f"Fehlende Bibliotheken: {', '.join(missing_libraries)}. Bitte installieren Sie diese vor dem Ausführen des Skripts.")
+    raise ImportError(f"Fehlende Bibliotheken: {', '.join(missing_libraries)}. Bitte installieren Sie diese vor dem Ausführen des Skripts.")
 
 
 def schallgeschwindigkeit(temp, feuchte, druck=101.325):
@@ -32,6 +47,12 @@ def schallgeschwindigkeit(temp, feuchte, druck=101.325):
     :param druck: Atmosphärischer Druck in kPa (optional, Standard: 101.325 kPa)
     :return: Schallgeschwindigkeit in m/s
     """
+    if temp < -50 or temp > 50:
+        logging.warning("Ungewöhnliche Temperatur. Verwende Standardwert 20°C.")
+        temp = 20
+    if feuchte < 0 or feuchte > 100:
+        logging.warning("Ungewöhnliche Luftfeuchtigkeit. Verwende Standardwert 50%.")
+        feuchte = 50
     return 331 + 0.6 * temp + 0.0124 * feuchte + 0.0006 * (druck / 1000)
 
 
@@ -66,45 +87,6 @@ def distance(point1, point2):
     return np.linalg.norm(point1 - point2)
 
 
-def generate_image_sources_iterative(source, planes, max_order, frequency, material_properties, mic_positions, absorption_threshold=0.01):
-    """
-    Iterativ generierte Bildquellen bis zur maximalen Reflexionsordnung, unter Berücksichtigung von Absorptionsschwellen.
-
-    :param source: Ursprüngliche Schallquelle als numpy-Array [x, y, z]
-    :param planes: Liste von Ebenen, jede definiert durch {'plane': [a, b, c, d], 'material': 'material_name'}
-    :param max_order: Maximale Reflexionsordnung
-    :param frequency: Frequenz des Signals in Hz
-    :param material_properties: Dictionary mit materialabhängigen Dämpfungsfaktoren
-    :param mic_positions: Array der Mikrofonpositionen (nx3)
-    :param absorption_threshold: Minimale Abschwächung, um eine Bildquelle zu berücksichtigen
-    :return: Liste von Bildquellen als Dictionary {'source': [x', y', z'], 'material': 'material_name'}
-    """
-    image_sources = []
-    current_sources = [source]
-    seen_sources = set()
-    source_tuple = tuple(np.round(source, decimals=6))
-    seen_sources.add(source_tuple)
-
-    for order in range(1, max_order + 1):
-        new_sources = []
-        for src in current_sources:
-            for plane in planes:
-                image = reflect_point_across_plane(src, plane['plane'])
-                image_tuple = tuple(np.round(image, decimals=6))  # Runden zur Vermeidung von Float-Duplikaten
-                if image_tuple not in seen_sources:
-                    # Berechne die Abschwächung für die Bildquelle basierend auf Entfernung zu jedem Mikrofon
-                    attenuations = [calculate_attenuation(distance(image, mic_pos), plane.get('material', 'air'), frequency, material_properties) for mic_pos in mic_positions]
-                    # Überprüfen, ob mindestens eine Abschwächung über dem Schwellenwert liegt
-                    if any(att > absorption_threshold for att in attenuations):
-                        seen_sources.add(image_tuple)
-                        image_sources.append({'source': image, 'material': plane.get('material', 'air')})
-                        new_sources.append(image)
-        current_sources = new_sources
-        if not current_sources:
-            break  # Keine neuen Bildquellen generiert
-    return image_sources
-
-
 def calculate_attenuation(distance_val, material, frequency, material_properties):
     """
     Berechnet die Abschwächung der Signalamplitude basierend auf dem inversen Quadrat der Entfernung
@@ -136,54 +118,49 @@ def calculate_attenuation(distance_val, material, frequency, material_properties
     return attenuation
 
 
-def normalize_signal(signal):
+def generate_image_sources_iterative(source, planes, max_order, frequency, material_properties, mic_positions, absorption_threshold=0.01):
     """
-    Normalisiert das Signal auf den Bereich [-1, 1], ohne Division durch Null.
+    Iterativ generierte Bildquellen bis zur maximalen Reflexionsordnung, unter Berücksichtigung von Absorptionsschwellen.
 
-    :param signal: Eingabesignal als numpy-Array
-    :return: Normalisiertes Signal als numpy-Array
+    :param source: Ursprüngliche Schallquelle als numpy-Array [x, y, z]
+    :param planes: Liste von Ebenen, jede definiert durch {'plane': [a, b, c, d], 'material': 'material_name'}
+    :param max_order: Maximale Reflexionsordnung
+    :param frequency: Frequenz des Signals in Hz
+    :param material_properties: Dictionary mit materialabhängigen Dämpfungsfaktoren
+    :param mic_positions: Array der Mikrofonpositionen (nx3)
+    :param absorption_threshold: Minimale Abschwächung, um eine Bildquelle zu berücksichtigen
+    :return: Liste von Bildquellen als Dictionary {'source': [x', y', z'], 'material': 'material_name'}
     """
-    max_val = np.max(np.abs(signal))
-    if max_val == 0:
-        return signal
-    return signal / max_val
+    image_sources = []
+    current_sources = [source]
+    seen_sources = set()
+    source_tuple = tuple(np.round(source, decimals=6))
+    seen_sources.add(source_tuple)
 
-
-def dynamic_range_compression(signal, threshold=0.8, epsilon=1e-8):
-    """
-    Wendet eine logarithmische dynamische Bereichskompression an, um die Signalamplitude zu steuern.
-
-    :param signal: Eingabesignal als numpy-Array
-    :param threshold: Schwellenwert für die Kompression (zwischen 0 und 1)
-    :param epsilon: Kleiner Wert zur Vermeidung von log(0)
-    :return: Komprimiertes Signal als numpy-Array
-    """
-    # Normalisieren des Signals
-    normalized_signal = normalize_signal(signal)
-
-    # Logarithmische Kompression
-    compressed_signal = np.sign(normalized_signal) * np.log1p(np.abs(normalized_signal) / threshold + epsilon)
-
-    # Skalierung zurück zum Originalbereich
-    max_val = np.max(np.abs(compressed_signal))
-    if max_val > 0:
-        compressed_signal /= max_val
-    return compressed_signal
-
-
-def dynamic_range_compression_soft_clip(signal, threshold=0.8):
-    """
-    Wendet eine weiche Clipping-Kompression an, um die Signalamplitude zu steuern.
-
-    :param signal: Eingabesignal als numpy-Array
-    :param threshold: Schwellenwert für die Kompression (zwischen 0 und 1)
-    :return: Komprimiertes Signal als numpy-Array
-    """
-    signal = normalize_signal(signal)
-    compressed_signal = np.where(np.abs(signal) > threshold,
-                                 np.sign(signal) * (threshold + (np.abs(signal) - threshold) * 0.5),
-                                 signal)
-    return compressed_signal
+    for order in range(1, max_order + 1):
+        new_sources = []
+        for src in current_sources:
+            for plane in planes:
+                image = reflect_point_across_plane(src, plane['plane'])
+                image_tuple = tuple(np.round(image, decimals=6))  # Runden zur Vermeidung von Float-Duplikaten
+                if image_tuple not in seen_sources:
+                    # Überprüfen, ob Materialeigenschaften definiert sind
+                    material = plane.get('material', 'air')
+                    required_keys = [f'{material}_absorption', f'{material}_freq']
+                    for key in required_keys:
+                        if key not in material_properties:
+                            raise ValueError(f"Materialeigenschaft '{key}' ist nicht definiert. Bitte im Dictionary ergänzen.")
+                    # Berechne die Abschwächung für die Bildquelle basierend auf Entfernung zu jedem Mikrofon
+                    attenuations = [calculate_attenuation(distance(image, mic_pos), material, frequency, material_properties) for mic_pos in mic_positions]
+                    # Überprüfen, ob mindestens eine Abschwächung über dem Schwellenwert liegt
+                    if any(att > absorption_threshold for att in attenuations):
+                        seen_sources.add(image_tuple)
+                        image_sources.append({'source': image, 'material': material})
+                        new_sources.append(image)
+        current_sources = new_sources
+        if not current_sources:
+            break  # Keine neuen Bildquellen generiert
+    return image_sources
 
 
 def generate_pink_noise(fs, duration):
@@ -315,10 +292,64 @@ def fractional_delay(signal, delay, fs):
     delayed_signal = np.fft.ifft(SIGNAL * phase_shift)
     # Rückgabe des realen Teils und Kürzen auf ursprüngliche Länge
     delayed_signal = delayed_signal.real[:N]
-    # Anwendung einer Fensterfunktion zur Glättung der Übergänge
+    # Anwendung einer Fensterfunktion nur an den Rändern zur Glättung der Übergänge
     window = get_window('hann', N)
-    delayed_signal *= window
+    fade_length = int(0.01 * N)  # 1% der Signalgröße für Fade-in und Fade-out
+    window_full = np.ones(N)
+    window_full[:fade_length] *= np.linspace(0, 1, fade_length)
+    window_full[-fade_length:] *= np.linspace(1, 0, fade_length)
+    delayed_signal *= window_full
     return delayed_signal
+
+
+def normalize_signal(signal):
+    """
+    Normalisiert das Signal auf den Bereich [-1, 1], ohne Division durch Null.
+
+    :param signal: Eingabesignal als numpy-Array
+    :return: Normalisiertes Signal als numpy-Array
+    """
+    max_val = np.max(np.abs(signal))
+    if max_val == 0:
+        return signal
+    return signal / max_val
+
+
+def dynamic_range_compression(signal, threshold=0.8, epsilon=1e-8):
+    """
+    Wendet eine logarithmische dynamische Bereichskompression an, um die Signalamplitude zu steuern.
+
+    :param signal: Eingabesignal als numpy-Array
+    :param threshold: Schwellenwert für die Kompression (zwischen 0 und 1)
+    :param epsilon: Kleiner Wert zur Vermeidung von log(0)
+    :return: Komprimiertes Signal als numpy-Array
+    """
+    # Normalisieren des Signals
+    normalized_signal = normalize_signal(signal)
+
+    # Logarithmische Kompression
+    compressed_signal = np.sign(normalized_signal) * np.log1p(np.abs(normalized_signal) / threshold + epsilon)
+
+    # Skalierung zurück zum Originalbereich
+    max_val = np.max(np.abs(compressed_signal))
+    if max_val > 0:
+        compressed_signal /= max_val
+    return compressed_signal
+
+
+def dynamic_range_compression_soft_clip(signal, threshold=0.8):
+    """
+    Wendet eine weiche Clipping-Kompression an, um die Signalamplitude zu steuern.
+
+    :param signal: Eingabesignal als numpy-Array
+    :param threshold: Schwellenwert für die Kompression (zwischen 0 und 1)
+    :return: Komprimiertes Signal als numpy-Array
+    """
+    signal = normalize_signal(signal)
+    compressed_signal = np.where(np.abs(signal) > threshold,
+                                 np.sign(signal) * (threshold + (np.abs(signal) - threshold) * 0.5),
+                                 signal)
+    return compressed_signal
 
 
 def phat_correlation(sig1, sig2):
@@ -390,7 +421,7 @@ def bootstrap_significance(sig1, sig2, fs, num_bootstrap=1000, alpha=0.05):
         corr_bootstrap = phat_correlation(sig1, sig2_permuted)
         peak_bootstrap = np.max(corr_bootstrap)
         bootstrap_peaks.append(peak_bootstrap)
-    
+
     # Bestimmen der (1 - alpha) Quantil als Signifikanzschwelle
     threshold = np.percentile(bootstrap_peaks, 100 * (1 - alpha))
     return threshold
@@ -464,7 +495,7 @@ def perform_significance_test(corr, sig1, sig2, fs, alpha=0.05, snr_threshold=2.
 
     # Signifikanztest mittels Bootstrap
     peak, significant_peak = perform_significance_test_bootstrap(sig1, sig2, fs, alpha=alpha)
-    
+
     # Signifikanz basierend auf Bootstrap und dynamischem SNR-Schwellenwert
     significant = significant_peak and snr > snr_threshold
 
@@ -533,13 +564,14 @@ def synchronize_signals_improved(signals, fs):
     return synchronized_signals
 
 
-def plot_correlation_heatmap(corr_matrix, mic_positions, title="Heatmap der Peak-Korrelationen zwischen Mikrofonpaaren"):
+def plot_correlation_heatmap(corr_matrix, mic_positions, title="Heatmap der Peak-Korrelationen zwischen Mikrofonpaaren", show_plot=True):
     """
     Erstellt eine Heatmap der Peak-Korrelationen zwischen Mikrofonpaaren.
 
     :param corr_matrix: 2D-Array der Peak-Korrelationen
     :param mic_positions: Array der Mikrofonpositionen
     :param title: Titel der Heatmap
+    :param show_plot: Boolean, ob die Plot angezeigt werden soll oder nur gespeichert wird
     """
     num_mics = len(mic_positions)
     fig, ax = plt.subplots(figsize=(8, 6))
@@ -559,10 +591,14 @@ def plot_correlation_heatmap(corr_matrix, mic_positions, title="Heatmap der Peak
     # Titel
     ax.set_title(title)
     fig.tight_layout()
-    plt.show()
+    if show_plot:
+        plt.show()
+    else:
+        plt.savefig("heatmap.png")
+    plt.close(fig)
 
 
-def plot_correlation_3d(corr_data, mic_pairs, fs, title="3D-Kreuzkorrelationsplots"):
+def plot_correlation_3d(corr_data, mic_pairs, fs, title="3D-Kreuzkorrelationsplots", show_plot=True):
     """
     Erstellt einen 3D-Plot der Kreuzkorrelationen für alle Mikrofonpaare.
 
@@ -570,6 +606,7 @@ def plot_correlation_3d(corr_data, mic_pairs, fs, title="3D-Kreuzkorrelationsplo
     :param mic_pairs: Liste von Mikrofonpaaren als Tuple (i, j)
     :param fs: Abtastrate in Hz
     :param title: Titel des 3D-Plots
+    :param show_plot: Boolean, ob die Plot angezeigt werden soll oder nur gespeichert wird
     """
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
@@ -583,7 +620,11 @@ def plot_correlation_3d(corr_data, mic_pairs, fs, title="3D-Kreuzkorrelationsplo
     ax.set_zlabel('Korrelation')
     ax.set_title(title)
     ax.legend()
-    plt.show()
+    if show_plot:
+        plt.show()
+    else:
+        plt.savefig("correlation_3d.png")
+    plt.close(fig)
 
 
 def resample_audio(data, original_fs, target_fs):
@@ -659,13 +700,13 @@ def heuristic_initialization_adaptive(mic_positions, mic_pairs, tdoas, c):
     if not tdoas:
         # Fallback auf geometrischen Mittelpunkt
         return [np.mean(mic_positions, axis=0)]
-    
+
     # Gewichtete Mittelung basierend auf inverser TDOA
     tdoas = np.array(tdoas)
     # Vermeidung von Division durch Null
     weights = np.where(tdoas != 0, 1 / np.abs(tdoas), 1.0)
     weights /= np.sum(weights)
-    
+
     estimated_positions = []
     for (i, j), td in zip(mic_pairs, tdoas):
         if td == 0:
@@ -679,19 +720,358 @@ def heuristic_initialization_adaptive(mic_positions, mic_pairs, tdoas, c):
         estimated_distance = (td * c) / 2
         estimated_position = mic1 + direction_norm * estimated_distance
         estimated_positions.append(estimated_position)
-    
+
     if not estimated_positions:
         # Falls alle TDOAs Null sind
         return [np.mean(mic_positions, axis=0)]
-    
+
     # Dynamisch die optimale Anzahl der Cluster bestimmen
     num_clusters = determine_optimal_number_of_clusters(estimated_positions)
     kmeans = KMeans(n_clusters=num_clusters, random_state=0).fit(estimated_positions)
     initial_guesses = kmeans.cluster_centers_.tolist()
-    
+
     # Ergänzen Sie den geometrischen Mittelpunkt als zusätzlichen Startpunkt
     initial_guesses.append(np.mean(mic_positions, axis=0))
-    
+
+    return initial_guesses
+
+
+def dynamic_bounds_extended(mic_positions, tdoas, c, buffer=5.0):
+    """
+    Berechnet die dynamischen Optimierungsgrenzen basierend auf den Mikrofonpositionen und den TDOAs.
+
+    :param mic_positions: Array mit den Positionen der Mikrofone (nx3)
+    :param tdoas: Array von TDOAs für die Mikrofonpaare
+    :param c: Schallgeschwindigkeit in m/s
+    :param buffer: Zusätzlicher Puffer in Metern für die Grenzen
+    :return: Liste von Tupeln (min, max) für x, y, z
+    """
+    # Berechnung der minimalen und maximalen möglichen Positionen basierend auf Mikrofonanordnung und TDOAs
+    # Dies ist eine vereinfachte Annahme; in komplexen Szenarien könnte eine geometrische Analyse erforderlich sein
+    min_coords = np.min(mic_positions, axis=0) - buffer
+    max_coords = np.max(mic_positions, axis=0) + buffer
+    return [
+        (min_coords[0], max_coords[0]),
+        (min_coords[1], max_coords[1]),
+        (min_coords[2], max_coords[2])
+    ]
+
+
+def equations(vars, mic_positions, mic_pairs, tdoas, c, weights=None):
+    """
+    Gleichungen für die Least Squares Optimierung mit Gewichtung.
+
+    :param vars: Array [x, y, z] der geschätzten Schallquellenposition
+    :param mic_positions: Array der Mikrofonpositionen (nx3)
+    :param mic_pairs: Liste von Mikrofonpaaren als Tuple (i, j)
+    :param tdoas: Array von TDOAs für die Mikrofonpaare
+    :param c: Schallgeschwindigkeit in m/s
+    :param weights: Array von Gewichten für die Residuen
+    :return: Residuen als numpy-Array
+    """
+    x, y, z = vars
+    source = np.array([x, y, z])
+    residuals = []
+    for idx, ((i, j), td) in enumerate(zip(mic_pairs, tdoas)):
+        d_i = np.linalg.norm(source - mic_positions[i])
+        d_j = np.linalg.norm(source - mic_positions[j])
+        residual = (d_j - d_i) - c * td
+        if weights is not None and idx < len(weights):
+            residual *= weights[idx]
+        residuals.append(residual)
+    return residuals
+
+
+def compute_weights(correlation_metrics, mic_pairs):
+    """
+    Berechnet Gewichte basierend auf der Signifikanz der Kreuzkorrelationen.
+    Höhere Gewichte für signifikante TDOAs.
+
+    :param correlation_metrics: Dictionary mit Kreuzkorrelationsmetriken
+    :param mic_pairs: Liste von Mikrofonpaaren als Tuple (i, j)
+    :return: Liste von Gewichten
+    """
+    weights = []
+    for pair in mic_pairs:
+        metrics = correlation_metrics.get(pair, {})
+        snr = metrics.get('snr', 1.0)
+        significant = metrics.get('significant', False)
+        weight = snr if significant else 0.5  # Beispielgewichtung
+        weights.append(weight)
+    return weights
+
+
+def simulate_signals_with_multipath(
+    source_pos,
+    mic_positions,
+    fs,
+    c,
+    duration=1.0,
+    signal_type='sine',
+    freq=1000,
+    reflektierende_ebenen=None,
+    material_properties=None,
+    max_reflections=2,
+    absorption_threshold=0.01  # Neuer Parameter hinzugefügt
+):
+    """
+    Simuliert Signale für alle Mikrofone unter Berücksichtigung von Mehrwegeausbreitung.
+
+    :param source_pos: Position der Schallquelle (3D) als numpy-Array [x, y, z]
+    :param mic_positions: Array der Mikrofonpositionen (nx3)
+    :param fs: Abtastrate in Hz
+    :param c: Schallgeschwindigkeit in m/s
+    :param duration: Dauer des Signals in Sekunden
+    :param signal_type: Typ des Signals ('sine', 'noise', 'chirp', 'speech')
+    :param freq: Frequenz des Signals in Hz
+    :param reflektierende_ebenen: Liste von Ebenen, jede definiert durch {'plane': [a, b, c, d], 'material': 'material_name'}
+    :param material_properties: Dictionary mit Materialeigenschaften für Dämpfungen
+    :param max_reflections: Maximale Anzahl von Reflexionen
+    :param absorption_threshold: Minimale Abschwächung zur Berücksichtigung einer Bildquelle
+    :return: Liste von simulierten Signalen für jedes Mikrofon
+    """
+    base_signal = generate_signal(signal_type, fs, duration, freq)
+    all_image_sources = generate_image_sources_iterative(source_pos, reflektierende_ebenen, max_reflections, freq, material_properties, mic_positions, absorption_threshold=absorption_threshold)
+    signals = []
+
+    # Bestimmen der maximalen Verzögerung
+    max_delay = 0
+    for mic_pos in mic_positions:
+        direct_distance = distance(source_pos, mic_pos)
+        reflection_distances = [distance(img['source'], mic_pos) for img in all_image_sources]
+        max_distance = direct_distance + (max(reflection_distances) if reflection_distances else 0)
+        max_delay = max(max_delay, max_distance / c)
+
+    total_samples = int((duration + max_delay) * fs)
+    base_signal_padded = np.pad(base_signal, (0, total_samples - len(base_signal)), 'constant')
+
+    for mic_pos in mic_positions:
+        signal_total = np.zeros(total_samples)
+        # Direkter Pfad
+        distance_direct = np.linalg.norm(source_pos - mic_pos)
+        time_delay_direct = distance_direct / c
+        attenuation_direct = calculate_attenuation(distance_direct, 'air', freq, material_properties)
+        delayed_direct = fractional_delay(base_signal_padded, time_delay_direct, fs)
+        signal_total += delayed_direct * attenuation_direct
+        logging.debug(f"Direkter Pfad für Mikrofon {mic_pos}: Delta d = {distance_direct:.3f} m, Delta t = {time_delay_direct:.6f} s, Attenuation = {attenuation_direct:.6f}")
+
+        # Reflexionen
+        for img in all_image_sources:
+            image_source = img['source']
+            material = img['material']
+            distance_val = distance(image_source, mic_pos)
+            time_delay = distance_val / c
+            attenuation = calculate_attenuation(distance_val, material, freq, material_properties)
+            delayed_signal = fractional_delay(base_signal_padded, time_delay, fs)
+            signal_total += delayed_signal * attenuation
+            delta_d = distance_val - distance_direct
+            logging.debug(f"Reflexion über Material '{material}' für Mikrofon {mic_pos}: Delta d = {delta_d:.3f} m, Delta t = {time_delay:.6f} s, Attenuation = {attenuation:.6f}")
+
+        # Trimmen auf ursprüngliche Länge plus maximaler Verzögerung
+        signal_total = signal_total[:int(duration * fs)]
+
+        # Normalisierung und dynamische Bereichskompression
+        signal_total = normalize_signal(signal_total)
+        signal_total = dynamic_range_compression(signal_total)
+
+        # Hinzufügen zum Signalset
+        signals.append(signal_total)
+
+    return signals
+
+
+def rauschunterdrueckung(signal, fs, method='butterworth', lowcut=300, highcut=3400):
+    """
+    Wendet Rauschunterdrückung auf das Signal an.
+
+    :param signal: Eingabesignal als numpy-Array
+    :param fs: Abtastrate in Hz
+    :param method: Methode zur Rauschunterdrückung ('butterworth', 'wiener')
+    :param lowcut: Untere Grenzfrequenz für Bandpassfilter
+    :param highcut: Obere Grenzfrequenz für Bandpassfilter
+    :return: Gefiltertes Signal als numpy-Array
+    """
+    if method == 'butterworth':
+        nyquist = 0.5 * fs
+        low = lowcut / nyquist
+        high = highcut / nyquist
+        b, a = butter(5, [low, high], btype='band')
+        return filtfilt(b, a, signal)
+    elif method == 'wiener':
+        return wiener(signal)
+    else:
+        raise ValueError("Unbekannte Filtermethode. Verfügbare Methoden: 'butterworth', 'wiener'")
+
+
+def plot_correlation_heatmap(corr_matrix, mic_positions, title="Heatmap der Peak-Korrelationen zwischen Mikrofonpaaren", show_plot=True):
+    """
+    Erstellt eine Heatmap der Peak-Korrelationen zwischen Mikrofonpaaren.
+
+    :param corr_matrix: 2D-Array der Peak-Korrelationen
+    :param mic_positions: Array der Mikrofonpositionen
+    :param title: Titel der Heatmap
+    :param show_plot: Boolean, ob die Plot angezeigt werden soll oder nur gespeichert wird
+    """
+    num_mics = len(mic_positions)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    im = ax.imshow(corr_matrix, cmap='viridis')
+
+    # Beschriftungen
+    ax.set_xticks(np.arange(num_mics))
+    ax.set_yticks(np.arange(num_mics))
+    ax.set_xticklabels([f'Mic {i+1}' for i in range(num_mics)])
+    ax.set_yticklabels([f'Mic {i+1}' for i in range(num_mics)])
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+
+    # Farbskala
+    cbar = ax.figure.colorbar(im, ax=ax)
+    cbar.ax.set_ylabel('Peak-Korrelation', rotation=-90, va="bottom")
+
+    # Titel
+    ax.set_title(title)
+    fig.tight_layout()
+    if show_plot:
+        plt.show()
+    else:
+        plt.savefig("heatmap.png")
+    plt.close(fig)
+
+
+def plot_correlation_3d(corr_data, mic_pairs, fs, title="3D-Kreuzkorrelationsplots", show_plot=True):
+    """
+    Erstellt einen 3D-Plot der Kreuzkorrelationen für alle Mikrofonpaare.
+
+    :param corr_data: Liste von Kreuzkorrelationsarrays
+    :param mic_pairs: Liste von Mikrofonpaaren als Tuple (i, j)
+    :param fs: Abtastrate in Hz
+    :param title: Titel des 3D-Plots
+    :param show_plot: Boolean, ob die Plot angezeigt werden soll oder nur gespeichert wird
+    """
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+
+    for idx, (corr, pair) in enumerate(zip(corr_data, mic_pairs)):
+        lags = np.linspace(-(len(corr)-1)/fs, (len(corr)-1)/fs, len(corr))
+        ax.plot(lags, [idx]*len(lags), corr, label=f'Mic {pair[0]+1} - Mic {pair[1]+1}')
+
+    ax.set_xlabel('Lags (s)')
+    ax.set_ylabel('Mikrofonpaare')
+    ax.set_zlabel('Korrelation')
+    ax.set_title(title)
+    ax.legend()
+    if show_plot:
+        plt.show()
+    else:
+        plt.savefig("correlation_3d.png")
+    plt.close(fig)
+
+
+def resample_audio(data, original_fs, target_fs):
+    """
+    Resampelt das Audiosignal von original_fs auf target_fs unter Verwendung von resampy.
+
+    :param data: Eingabesignal als numpy-Array
+    :param original_fs: Originale Abtastrate in Hz
+    :param target_fs: Ziel-Abtastrate in Hz
+    :return: Resampeltes Signal als numpy-Array
+    """
+    resampled = resampy.resample(data, original_fs, target_fs, filter='kaiser_best')
+    return resampled
+
+
+def einlesen_audiodaten(dateipfad, expected_fs):
+    """
+    Liest Audiodaten von einer Datei ein, überprüft die Abtastrate und resampelt bei Bedarf.
+
+    :param dateipfad: Pfad zur Audiodatei
+    :param expected_fs: Erwartete Abtastrate in Hz
+    :return: Tuple (signal, fs) mit dem eingelesenen und ggf. resampelten Signal sowie der Abtastrate
+    """
+    try:
+        signal, fs = sf.read(dateipfad)
+        if signal.ndim > 1:
+            # Durchschnitt aller Kanäle bilden, um ein monokanal Signal zu erhalten
+            signal = np.mean(signal, axis=1)
+        if fs != expected_fs:
+            logging.info(f"Resampling der Datei '{dateipfad}' von {fs} Hz auf {expected_fs} Hz.")
+            signal = resample_audio(signal, fs, expected_fs)
+            fs = expected_fs
+        # Normalisierung und dynamische Bereichskompression
+        signal = normalize_signal(signal)
+        signal = dynamic_range_compression(signal)
+        return signal, fs
+    except Exception as e:
+        logging.error(f"Fehler beim Einlesen der Audiodatei '{dateipfad}': {e}")
+        raise RuntimeError(f"Fehler beim Einlesen der Audiodatei '{dateipfad}': {e}")
+
+
+def determine_optimal_number_of_clusters(data, max_clusters=5):
+    """
+    Bestimmt die optimale Anzahl von Clustern basierend auf dem Silhouette-Score.
+
+    :param data: Liste von geschätzten Positionen
+    :param max_clusters: Maximale Anzahl von Clustern, die getestet werden sollen
+    :return: Optimale Anzahl von Clustern als int
+    """
+    if len(data) < 2:
+        return 1
+    best_score = -1
+    best_k = 1
+    for k in range(2, min(max_clusters, len(data)) + 1):
+        kmeans = KMeans(n_clusters=k, random_state=0).fit(data)
+        score = silhouette_score(data, kmeans.labels_)
+        if score > best_score:
+            best_score = score
+            best_k = k
+    return best_k
+
+
+def heuristic_initialization_adaptive(mic_positions, mic_pairs, tdoas, c):
+    """
+    Heuristische Schätzung der Schallquellenposition basierend auf TDOAs unter Einbeziehung mehrerer Mikrofonpaare.
+
+    :param mic_positions: Array mit den Positionen der Mikrofone (nx3)
+    :param mic_pairs: Liste von Mikrofonpaaren als Tuple (i, j)
+    :param tdoas: Array von TDOAs für die Mikrofonpaare
+    :param c: Schallgeschwindigkeit in m/s
+    :return: Liste von geschätzten Startpositionen als numpy-Arrays [x, y, z]
+    """
+    if not tdoas:
+        # Fallback auf geometrischen Mittelpunkt
+        return [np.mean(mic_positions, axis=0)]
+
+    # Gewichtete Mittelung basierend auf inverser TDOA
+    tdoas = np.array(tdoas)
+    # Vermeidung von Division durch Null
+    weights = np.where(tdoas != 0, 1 / np.abs(tdoas), 1.0)
+    weights /= np.sum(weights)
+
+    estimated_positions = []
+    for (i, j), td in zip(mic_pairs, tdoas):
+        if td == 0:
+            continue
+        mic1, mic2 = mic_positions[i], mic_positions[j]
+        # Richtung von mic1 zu mic2
+        direction = mic2 - mic1
+        norm_dir = np.linalg.norm(direction)
+        direction_norm = direction / norm_dir if norm_dir != 0 else direction
+        # Geschätzte Position entlang der Richtung basierend auf der TDOA
+        estimated_distance = (td * c) / 2
+        estimated_position = mic1 + direction_norm * estimated_distance
+        estimated_positions.append(estimated_position)
+
+    if not estimated_positions:
+        # Falls alle TDOAs Null sind
+        return [np.mean(mic_positions, axis=0)]
+
+    # Dynamisch die optimale Anzahl der Cluster bestimmen
+    num_clusters = determine_optimal_number_of_clusters(estimated_positions)
+    kmeans = KMeans(n_clusters=num_clusters, random_state=0).fit(estimated_positions)
+    initial_guesses = kmeans.cluster_centers_.tolist()
+
+    # Ergänzen Sie den geometrischen Mittelpunkt als zusätzlichen Startpunkt
+    initial_guesses.append(np.mean(mic_positions, axis=0))
+
     return initial_guesses
 
 
@@ -779,15 +1159,13 @@ def lokalisieren_schallquelle(
     filter_method='butterworth',
     use_simulation=True,
     audiodateien=None,
-    # max_distance=10,  # Entfernt, da nicht in simulate_signals_with_multipath verwendet
     absorption_threshold=0.01,  # Minimale Abschwächung zur Berücksichtigung einer Bildquelle
     analyze_correlation=False,  # Neuer Parameter zur Aktivierung der erweiterten Analyse
     visualize_correlation=False,  # Neuer Parameter zur Aktivierung der erweiterten Visualisierung
-    num_paths=1,  # Anzahl der Pfade, die identifiziert werden sollen
     clustering_eps=None,  # Epsilon für DBSCAN-Clustering in Sekunden, dynamisch angepasst
     clustering_min_samples=2,  # Mindestanzahl von Peaks pro Cluster für DBSCAN
     max_reflections=2,  # Maximale Anzahl der Reflexionen
-    num_sources=1  # Anzahl der Schallquellen
+    show_plots=True  # Neuer Parameter zur Steuerung der Visualisierung
 ):
     """
     Führt die Lokalisierung der Schallquelle durch, mit optionaler erweiterter Analyse und Visualisierung der Kreuzkorrelationen.
@@ -808,11 +1186,10 @@ def lokalisieren_schallquelle(
     :param absorption_threshold: Minimale Abschwächung zur Berücksichtigung einer Bildquelle
     :param analyze_correlation: Boolean, ob erweiterte Analyse der Kreuzkorrelation durchgeführt werden soll
     :param visualize_correlation: Boolean, ob erweiterte Visualisierung der Kreuzkorrelation durchgeführt werden soll
-    :param num_paths: Anzahl der Pfade, die identifiziert werden sollen
     :param clustering_eps: Epsilon-Wert für DBSCAN-Clustering in Sekunden (dynamisch angepasst)
     :param clustering_min_samples: Mindestanzahl von Peaks pro Cluster für DBSCAN
     :param max_reflections: Maximale Anzahl der Reflexionen
-    :param num_sources: Anzahl der Schallquellen
+    :param show_plots: Boolean, ob Plots angezeigt werden sollen oder nur gespeichert werden
     :return: Dictionary mit Ergebnissen der Lokalisierung
     """
     try:
@@ -847,6 +1224,13 @@ def lokalisieren_schallquelle(
                     'wood_absorption': 0.05,   # Beispielwerte
                     'metal_absorption': 0.1
                 }
+            # Überprüfen, ob alle Materialien definiert sind
+            for plane in reflektierende_ebenen:
+                material = plane.get('material', 'air')
+                required_keys = [f'{material}_absorption', f'{material}_freq']
+                for key in required_keys:
+                    if key not in material_properties:
+                        raise ValueError(f"Materialeigenschaft '{key}' ist nicht definiert. Bitte im Dictionary ergänzen.")
             signals = simulate_signals_with_multipath(
                 source_pos=source_position,
                 mic_positions=mic_positions,
@@ -878,26 +1262,6 @@ def lokalisieren_schallquelle(
         logging.info("Signale synchronisiert.")
 
         # 4. Rauschunterdrückung
-        def rauschunterdrueckung(signal, fs, method='butterworth'):
-            """
-            Wendet Rauschunterdrückung auf das Signal an.
-
-            :param signal: Eingabesignal als numpy-Array
-            :param fs: Abtastrate in Hz
-            :param method: Methode zur Rauschunterdrückung ('butterworth', 'wiener')
-            :return: Gefiltertes Signal als numpy-Array
-            """
-            if method == 'butterworth':
-                nyquist = 0.5 * fs
-                low = 300 / nyquist
-                high = 3400 / nyquist
-                b, a = butter(5, [low, high], btype='band')
-                return filtfilt(b, a, signal)
-            elif method == 'wiener':
-                return wiener(signal)
-            else:
-                raise ValueError("Unbekannte Filtermethode. Verfügbare Methoden: 'butterworth', 'wiener'")
-
         gefilterte_signale = [rauschunterdrueckung(sig, fs, method=filter_method) for sig in signals]
         for i in range(len(gefilterte_signale)):
             logging.info(f"Signal {i+1} nach Rauschunterdrückung mit Methode '{filter_method}' gefiltert.")
@@ -918,7 +1282,7 @@ def lokalisieren_schallquelle(
                     gefilterte_signale[i],
                     gefilterte_signale[j],
                     fs,
-                    num_peaks=num_paths
+                    num_peaks=1  # Entfernt 'num_sources' und verwendet einen festen Wert
                 )
                 if not time_delays:
                     logging.warning(f"Keine Zeitverzögerungen für Mikrofon {i+1} - Mikrofon {j+1} gefunden.")
@@ -1034,15 +1398,19 @@ def lokalisieren_schallquelle(
             ax.set_zlabel('Z (m)')
             ax.legend()
             plt.title('Schallquellenlokalisierung')
-            plt.show()
+            if show_plots:
+                plt.show()
+            else:
+                plt.savefig("localization_result.png")
+            plt.close(fig)
 
         # Erweiterte Visualisierung der Kreuzkorrelationen (einmalig)
         if visualize_correlation:
             # Heatmap der Peak-Korrelationen
-            plot_correlation_heatmap(corr_matrix, mic_positions)
+            plot_correlation_heatmap(corr_matrix, mic_positions, show_plot=show_plots)
 
             # 3D-Korrelationsplots
-            plot_correlation_3d(corr_data_for_3d, pairs_for_3d, fs)
+            plot_correlation_3d(corr_data_for_3d, pairs_for_3d, fs, show_plot=show_plots)
 
         # Optional: Erweiterte mathematische Kennzahlen ausgeben
         if analyze_correlation:
@@ -1064,82 +1432,6 @@ def lokalisieren_schallquelle(
         }
 
 
-def simulate_signals_with_multipath(
-    source_pos,
-    mic_positions,
-    fs,
-    c,
-    duration=1.0,
-    signal_type='sine',
-    freq=1000,
-    reflektierende_ebenen=None,
-    material_properties=None,
-    max_reflections=2,
-    absorption_threshold=0.01  # Neuer Parameter hinzugefügt
-):
-    """
-    Simuliert Signale für alle Mikrofone unter Berücksichtigung von Mehrwegeausbreitung.
-
-    :param source_pos: Position der Schallquelle (3D) als numpy-Array [x, y, z]
-    :param mic_positions: Array der Mikrofonpositionen (nx3)
-    :param fs: Abtastrate in Hz
-    :param c: Schallgeschwindigkeit in m/s
-    :param duration: Dauer des Signals in Sekunden
-    :param signal_type: Typ des Signals ('sine', 'noise', 'chirp', 'speech')
-    :param freq: Frequenz des Signals in Hz
-    :param reflektierende_ebenen: Liste von Ebenen, jede definiert durch {'plane': [a, b, c, d], 'material': 'material_name'}
-    :param material_properties: Dictionary mit Materialeigenschaften für Dämpfungen
-    :param max_reflections: Maximale Anzahl von Reflexionen
-    :param absorption_threshold: Minimale Abschwächung zur Berücksichtigung einer Bildquelle
-    :return: Liste von simulierten Signalen für jedes Mikrofon
-    """
-    base_signal = generate_signal(signal_type, fs, duration, freq)
-    all_image_sources = generate_image_sources_iterative(source_pos, reflektierende_ebenen, max_reflections, freq, material_properties, mic_positions, absorption_threshold=absorption_threshold)
-    signals = []
-    
-    # Bestimmen der maximalen Verzögerung
-    max_delay = 0
-    for mic_pos in mic_positions:
-        direct_distance = distance(source_pos, mic_pos)
-        reflection_distances = [distance(img['source'], mic_pos) for img in all_image_sources]
-        max_distance = direct_distance + (max(reflection_distances) if reflection_distances else 0)
-        max_delay = max(max_delay, max_distance / c)
-    
-    total_samples = int((duration + max_delay) * fs)
-    base_signal_padded = np.pad(base_signal, (0, total_samples - len(base_signal)), 'constant')
-    
-    for mic_pos in mic_positions:
-        signal_total = np.zeros(total_samples)
-        # Direkter Pfad
-        distance_direct = np.linalg.norm(source_pos - mic_pos)
-        time_delay_direct = distance_direct / c
-        attenuation_direct = calculate_attenuation(distance_direct, 'air', freq, material_properties)
-        delayed_direct = fractional_delay(base_signal_padded, time_delay_direct, fs)
-        signal_total += delayed_direct * attenuation_direct
-        logging.debug(f"Direkter Pfad für Mikrofon {mic_pos}: Delta d = {distance_direct:.3f} m, Delta t = {time_delay_direct:.6f} s, Attenuation = {attenuation_direct:.6f}")
-
-        # Reflexionen
-        for img in all_image_sources:
-            image_source = img['source']
-            material = img['material']
-            distance_val = distance(image_source, mic_pos)
-            time_delay = distance_val / c
-            attenuation = calculate_attenuation(distance_val, material, freq, material_properties)
-            delayed_signal = fractional_delay(base_signal_padded, time_delay, fs)
-            signal_total += delayed_signal * attenuation
-            delta_d = distance_val - distance_direct
-            logging.debug(f"Reflexion über Material '{material}' für Mikrofon {mic_pos}: Delta d = {delta_d:.3f} m, Delta t = {time_delay:.6f} s, Attenuation = {attenuation:.6f}")
-
-        # Trimmen auf ursprüngliche Länge
-        signal_total = signal_total[:int(duration * fs)]
-
-        # Hinzufügen zum Signalset
-        signals.append(signal_total)
-
-    # Normalisierung und dynamische Bereichskompression nach dem gesamten Mixing
-    # Dies wird bereits im Signalfluss nach der Simulation gemacht, daher ist hier keine weitere Normalisierung notwendig
-    return signals
-
 # Beispiel zur Nutzung
 if __name__ == "__main__":
     # Beispielparameter
@@ -1155,7 +1447,6 @@ if __name__ == "__main__":
     source_position = np.array([0.5, 0.5, 0.5])  # Tatsächliche Position der Schallquelle
     duration = 1.0  # Dauer des Signals in Sekunden
     freq = 1000  # Frequenz des Sinussignals in Hz
-    # max_distance = 10  # Entfernt, da nicht verwendet
 
     # Definieren der reflektierenden Ebenen mit Materialeigenschaften
     reflektierende_ebenen = [
@@ -1191,15 +1482,13 @@ if __name__ == "__main__":
         material_properties=material_properties,
         filter_method='butterworth',
         use_simulation=True,
-        # max_distance=max_distance,  # Entfernt
         absorption_threshold=0.01,  # Hinzugefügt
         analyze_correlation=True,
         visualize_correlation=True,
-        num_paths=1,  # Kann auf höhere Werte gesetzt werden, um mehrere Pfade zu identifizieren
         clustering_eps=None,  # Dynamisch angepasst
         clustering_min_samples=2,
         max_reflections=3,  # Erhöhte Anzahl der Reflexionen
-        # absorption_threshold=0.01  # Bereits oben definiert
+        show_plots=True  # Anzeigen der Plots
     )
 
     # Weitere Tests mit verschiedenen Signaltypen
@@ -1222,11 +1511,10 @@ if __name__ == "__main__":
             absorption_threshold=0.01,  # Hinzugefügt
             analyze_correlation=True,
             visualize_correlation=True,
-            num_paths=1,  # Kann auf höhere Werte gesetzt werden
             clustering_eps=0.001,
             clustering_min_samples=2,
             max_reflections=3,
-            num_sources=1
+            show_plots=True  # Anzeigen der Plots
         )
 
     # Lokalisierung mit realen Audiodaten und Butterworth-Filter, erweiterte Analyse und Visualisierung aktiviert
@@ -1243,11 +1531,10 @@ if __name__ == "__main__":
         absorption_threshold=0.01,  # Hinzugefügt
         analyze_correlation=True,
         visualize_correlation=True,
-        num_paths=1,  # Kann auf höhere Werte gesetzt werden
         clustering_eps=0.001,
         clustering_min_samples=2,
         max_reflections=3,
-        num_sources=1
+        show_plots=True  # Anzeigen der Plots
     )
 
     # Lokalisierung mit realen Audiodaten und Wiener-Filter, erweiterte Analyse und Visualisierung aktiviert
@@ -1263,9 +1550,8 @@ if __name__ == "__main__":
         absorption_threshold=0.01,  # Hinzugefügt
         analyze_correlation=True,
         visualize_correlation=True,
-        num_paths=1,  # Kann auf höhere Werte gesetzt werden
         clustering_eps=0.001,
         clustering_min_samples=2,
         max_reflections=3,
-        num_sources=1
+        show_plots=True  # Anzeigen der Plots
     )
