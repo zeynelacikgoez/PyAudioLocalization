@@ -2,7 +2,5 @@ numpy
 scipy
 soundfile
 matplotlib
-logging
 scikit-learn
-statsmodels
 resampy
