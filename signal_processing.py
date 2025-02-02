@@ -1,14 +1,14 @@
-# signal_processing.py
+######### signal_processing.py #########
 
 import numpy as np
-from scipy.signal import butter, filtfilt, wiener, chirp, get_window
+from scipy.signal import butter, filtfilt, wiener, chirp, get_window, firwin
 from scipy.fft import fft, ifft
 from scipy.interpolate import CubicSpline
 from scipy.stats import norm
 import resampy
 import logging
 
-def generate_pink_noise(fs, duration):
+def generate_pink_noise(fs: float, duration: float) -> np.ndarray:
     num_samples = int(fs * duration)
     white = np.random.randn(num_samples)
     fft_white = np.fft.rfft(white)
@@ -22,7 +22,7 @@ def generate_pink_noise(fs, duration):
     pink = dynamic_range_compression(pink)
     return pink
 
-def generate_signal(signal_type, fs, duration, freq):
+def generate_signal(signal_type: str, fs: float, duration: float, freq: float) -> np.ndarray:
     t = np.linspace(0, duration, int(fs * duration), endpoint=False)
     if signal_type == 'sine':
         return np.sin(2 * np.pi * freq * t)
@@ -33,9 +33,9 @@ def generate_signal(signal_type, fs, duration, freq):
     elif signal_type == 'speech':
         return generate_realistic_speech(fs, duration)
     else:
-        raise ValueError("Unbekannter Signaltyp. Verfügbare Typen: 'sine', 'noise', 'chirp', 'speech'")
+        raise ValueError("Unknown signal type. Available types: 'sine', 'noise', 'chirp', 'speech'")
 
-def generate_realistic_speech(fs, duration):
+def generate_realistic_speech(fs: float, duration: float) -> np.ndarray:
     t = np.linspace(0, duration, int(fs * duration), endpoint=False)
     F1, F2, F3 = 800, 1150, 2900
     A1, A2, A3 = 1.0, 0.8, 0.5
@@ -63,7 +63,7 @@ def generate_realistic_speech(fs, duration):
     s = dynamic_range_compression(s)
     return s
 
-def fractional_delay(signal, delay, fs):
+def fractional_delay(signal: np.ndarray, delay: float, fs: float) -> np.ndarray:
     N = len(signal)
     padded_length = 2 * N
     SIGNAL = np.fft.fft(signal, n=padded_length)
@@ -79,13 +79,13 @@ def fractional_delay(signal, delay, fs):
     delayed_signal *= window_full
     return delayed_signal
 
-def normalize_signal(signal):
+def normalize_signal(signal: np.ndarray) -> np.ndarray:
     max_val = np.max(np.abs(signal))
     if max_val == 0:
         return signal
     return signal / max_val
 
-def dynamic_range_compression(signal, threshold=0.8, epsilon=1e-8):
+def dynamic_range_compression(signal: np.ndarray, threshold: float = 0.8, epsilon: float = 1e-8) -> np.ndarray:
     normalized_signal = normalize_signal(signal)
     compressed_signal = np.sign(normalized_signal) * np.log1p(np.abs(normalized_signal) / threshold + epsilon)
     max_val = np.max(np.abs(compressed_signal))
@@ -93,7 +93,7 @@ def dynamic_range_compression(signal, threshold=0.8, epsilon=1e-8):
         compressed_signal /= max_val
     return compressed_signal
 
-def dynamic_range_compression_soft_clip(signal, threshold=0.8):
+def dynamic_range_compression_soft_clip(signal: np.ndarray, threshold: float = 0.8) -> np.ndarray:
     signal = normalize_signal(signal)
     compressed_signal = np.where(
         np.abs(signal) > threshold,
@@ -102,18 +102,37 @@ def dynamic_range_compression_soft_clip(signal, threshold=0.8):
     )
     return compressed_signal
 
-def resample_audio(data, original_fs, target_fs):
+def resample_audio(data: np.ndarray, original_fs: float, target_fs: float) -> np.ndarray:
     resampled = resampy.resample(data, original_fs, target_fs, filter='kaiser_best')
     return resampled
 
-def rauschunterdrueckung(signal, fs, method='butterworth', lowcut=300, highcut=3400):
+def noise_reduction(signal: np.ndarray,
+                    fs: float,
+                    method: str = 'butterworth',
+                    lowcut: float = 300,
+                    highcut: float = 3400,
+                    filter_order: int = 101) -> np.ndarray:
+    """
+    Reduce noise in a signal using the specified method.
+    
+    Verfügbare Methoden:
+      - 'butterworth': IIR-Filter (Butterworth)
+      - 'fir': FIR-Filter mit linearer Phase (verwendet firwin + filtfilt)
+      - 'wiener': Wiener-Filterung
+    """
+    nyquist = 0.5 * fs
     if method == 'butterworth':
-        nyquist = 0.5 * fs
         low = lowcut / nyquist
         high = highcut / nyquist
         b, a = butter(5, [low, high], btype='band')
         return filtfilt(b, a, signal)
+    elif method == 'fir':
+        low = lowcut / nyquist
+        high = highcut / nyquist
+        taps = firwin(filter_order, [low, high], pass_zero=False)
+        # filtfilt anwenden, um Phasenverzerrungen zu vermeiden
+        return filtfilt(taps, [1.0], signal)
     elif method == 'wiener':
         return wiener(signal)
     else:
-        raise ValueError("Unbekannte Filtermethode. Verfügbare Methoden: 'butterworth', 'wiener'")
+        raise ValueError("Unknown filter method. Available methods: 'butterworth', 'fir', 'wiener'")
