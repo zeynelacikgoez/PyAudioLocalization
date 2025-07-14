@@ -143,6 +143,18 @@ def localize_sound_source(config, calibration_data=None, audio_files=None, use_s
     clustering_eps = localization_params.get("clustering_eps", 0.001)
     clustering_min_samples = localization_params.get("clustering_min_samples", 2)
     max_expected_delay = localization_params.get("max_expected_delay", None)
+
+    calib_delays = None
+    if calibration_data is not None:
+        if len(calibration_data) != len(mic_positions):
+            logging.warning("Anzahl der Kalibrierdaten stimmt nicht mit der Anzahl der Mikrofone überein. Ignoriere Kalibrierung für diesen Durchlauf.")
+        else:
+            try:
+                calib_delays = np.array([d.get('delay', 0.0) for d in calibration_data], dtype=float)
+                logging.info("Kalibrierungskorrektur wird angewendet.")
+            except Exception as e:
+                logging.warning(f"Fehler beim Verarbeiten der Kalibrierdaten: {e}. Ignoriere Kalibrierung.")
+                calib_delays = None
     
     c = speed_of_sound(config["celsius"], config["humidity"])
     logging.info(f"Berechnete Schallgeschwindigkeit: {c:.2f} m/s")
@@ -191,12 +203,19 @@ def localize_sound_source(config, calibration_data=None, audio_files=None, use_s
         for j in range(i+1, len(filtered_signals)):
             time_delays, corr, lags = get_time_delays_phat(filtered_signals[i], filtered_signals[j], fs, num_peaks=1, max_expected_delay=max_expected_delay)
             if not time_delays:
-                logging.warning(f"Keine Zeitverzögerung für Mikrofonpaar {i+1}-{j+1 gefunden.")
+                logging.warning(f"Keine Zeitverzögerung für Mikrofonpaar {i+1}-{j+1} gefunden.")
                 continue
             for td in time_delays:
-                td_diffs.append(td)
-                mic_pairs.append((i, j))
-                logging.info(f"Zeitdifferenz für Mikrofonpaar {i+1}-{j+1}: {td:.6f} s")
+                if calib_delays is not None:
+                    correction = calib_delays[j] - calib_delays[i]
+                    td_corrected = td - correction
+                    td_diffs.append(td_corrected)
+                    mic_pairs.append((i, j))
+                    logging.info(f"Mikrofonpaar {i+1}-{j+1}: TDOA gemessen={td:.6f}s, Korrektur={correction:+.6f}s, TDOA korrigiert={td_corrected:.6f}s")
+                else:
+                    td_diffs.append(td)
+                    mic_pairs.append((i, j))
+                    logging.info(f"Zeitdifferenz für Mikrofonpaar {i+1}-{j+1}: {td:.6f} s (ohne Kalibrierung)")
             if analyze_correlation:
                 metrics = compute_cross_correlation_metrics(corr, filtered_signals[i], filtered_signals[j], fs, alpha=0.05)
                 correlation_metrics[(i, j)] = metrics
